@@ -12,7 +12,7 @@ sideloadable jar.
 
 ## Plugins
 
-### 🏦 Bank Value Tracker
+### Bank Value Tracker
 
 Tracks your bank's Grand Exchange and high-alch value over time, rendered with the client's
 own look-and-feel, real item icons and live prices.
@@ -39,7 +39,7 @@ own look-and-feel, real item icons and live prices.
   </tr>
 </table>
 
-### 🎒 Loadout Snapshots
+### Loadout Snapshots
 
 Snapshot your current inventory and equipment into named, icon-rendered loadouts you can
 review at a glance.
