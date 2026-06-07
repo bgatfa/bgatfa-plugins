@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "osrs-companion": {
+      "command": "node",
+      "args": ["external/osrs-mcp-companion/mcp-server/dist/index.js"],
+      "env": {
+        "OSRS_API_URL": "http://127.0.0.1:8085"
+      }
+    }
+  }
+}

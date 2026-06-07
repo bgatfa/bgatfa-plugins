@@ -1,0 +1,20 @@
+# Gradle
+.gradle/
+build/
+**/build/
+
+# External plugin sources: cloned fresh from upstream at build time by the
+# `fetch<Key>Source` Gradle tasks (always-latest), so they're never committed here.
+external/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# OS
+.DS_Store
+
+# Node (the MCP server lives under external/, which is itself ignored above; this
+# is a backstop for any local copies elsewhere)
+node_modules/
