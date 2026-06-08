@@ -511,8 +511,10 @@ class BankValueSort
 	 *       value (price × qty) is below the GE minimum, the HA sort drops those below the HA minimum.
 	 *       Only called while sorting, so {@code sort} is GE or HA here.</li>
 	 *   <li>"Hide untradeable & worthless" — when on, drop untradeables and items worth nothing on
-	 *       both GE and HA. Tradeability uses the panel's lenient test: a positive GE price counts as
-	 *       tradeable even when {@code isTradeable()} reads false on the current world.</li>
+	 *       both GE and HA. Tradeability is judged by {@code isTradeable()} alone: {@code getItemPrice()}
+	 *       is NOT a tradeability signal — it synthesizes a non-zero value for untradeable combination
+	 *       items (e.g. a slayer helmet ~1.2M from its components, marks of grace ~7.6k), so OR-ing it
+	 *       in would leak those untradeables past this filter.</li>
 	 * </ul>
 	 */
 	private boolean isHidden(int id, int quantity, ItemComposition comp)
@@ -529,8 +531,7 @@ class BankValueSort
 		}
 		if (config.hideUntradeable())
 		{
-			final boolean tradeable = comp.isTradeable() || ge > 0;
-			return !tradeable || (ge == 0 && comp.getHaPrice() == 0);
+			return !comp.isTradeable() || (ge == 0 && comp.getHaPrice() == 0);
 		}
 		return false;
 	}

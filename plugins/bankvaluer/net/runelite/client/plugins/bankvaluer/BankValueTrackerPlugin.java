@@ -173,10 +173,13 @@ public class BankValueTrackerPlugin extends Plugin
 			final int id = itemManager.canonicalize(rawId);
 			final ItemComposition comp = itemManager.getItemComposition(id);
 			final int ge = itemManager.getItemPrice(id);
-			// ItemComposition.isTradeable() reflects the CURRENT world, so members items read as
-			// untradeable on an F2P world. The GE price comes from a world-independent price list,
-			// so a non-zero price means the item is really tradeable regardless of where we're logged in.
-			final boolean tradeable = comp.isTradeable() || ge > 0;
+			// Judge tradeability by the cache flag alone. ItemComposition.isTradeable() is
+			// world-independent (membership is the separate isMembers flag), so we don't need a
+			// price-based fallback. Crucially, itemManager.getItemPrice() is NOT a tradeability
+			// signal: it synthesizes a non-zero value for untradeable combination items by summing
+			// their components (e.g. a slayer helmet from black mask + spiny helm + ...), which
+			// would otherwise sneak untradeables past the "hide untradeable" filter.
+			final boolean tradeable = comp.isTradeable();
 			list.add(new BankItem(id, comp.getName(), quantity, ge, comp.getHaPrice(), comp.isMembers(), tradeable));
 		}
 
