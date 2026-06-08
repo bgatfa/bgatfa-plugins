@@ -13,23 +13,12 @@ import net.runelite.client.config.ConfigItem;
 public interface BankCleanerConfig extends Config
 {
 	@ConfigItem(
-		keyName = "dryRun",
-		name = "Dry run",
-		description = "Preview the withdrawal plan (log + report file) without actually withdrawing.",
+		keyName = "showOverlay",
+		name = "Show overlay",
+		description = "Show the Bank Cleaner status overlay with current and upcoming item sprites.",
 		position = 0
 	)
-	default boolean dryRun()
-	{
-		return true;
-	}
-
-	@ConfigItem(
-		keyName = "writeReport",
-		name = "Write report file",
-		description = "Also write the plan/result to ~/.runelite/topwithdraw-last.txt.",
-		position = 1
-	)
-	default boolean writeReport()
+	default boolean showOverlay()
 	{
 		return true;
 	}

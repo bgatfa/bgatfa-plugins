@@ -40,11 +40,12 @@ import net.runelite.client.util.ReflectUtil;
  * without restarting the client — including structural edits (new classes/fields/lifecycle).
  *
  * <p>The trick is a classloader swap: when a jar changes we tear down its currently-loaded
- * plugin instances ({@link PluginManager#stopPlugin}/{@link PluginManager#remove}), drop the
- * old {@link URLClassLoader}, then load the jar's classes through a fresh loader and hand them
- * to {@link PluginManager#loadPlugins} (which builds a new Guice child injector) +
- * {@link PluginManager#startPlugin}. Because the classes come from a new loader, stock HotSpot
- * has no problem — nothing is being redefined, just newly loaded.
+ * plugin instances ({@link PluginManager#setPluginEnabled}/{@link PluginManager#stopPlugin}/
+ * {@link PluginManager#remove}), drop the old {@link URLClassLoader}, then load the jar's classes
+ * through a fresh loader and hand them to {@link PluginManager#loadPlugins} (which builds a new
+ * Guice child injector). Reloaded plugins are left disabled so the user can re-enable them after
+ * the swap settles. Because the classes come from a new loader, stock HotSpot has no problem —
+ * nothing is being redefined, just newly loaded.
  *
  * <p>Caveats: it can't reload <i>itself</i> (its own jar is skipped); the config sidebar may show
  * a stale entry until reopened; and a reloaded plugin's {@code shutDown()} must cleanly deregister
@@ -239,7 +240,8 @@ public class HotswapPlugin extends Plugin
 				return;
 			}
 
-			final List<Plugin> started = new ArrayList<>();
+			final int[] disabled = {0};
+			final int[] loaded = {0};
 			onEdt(() ->
 			{
 				// Tear down every currently-loaded instance of these plugin classes (match by name,
@@ -248,6 +250,11 @@ public class HotswapPlugin extends Plugin
 				{
 					if (descriptors.contains(p.getClass().getName()))
 					{
+						if (pluginManager.isPluginEnabled(p) || pluginManager.isPluginActive(p))
+						{
+							pluginManager.setPluginEnabled(p, false);
+							disabled[0]++;
+						}
 						try
 						{
 							pluginManager.stopPlugin(p);
@@ -264,19 +271,8 @@ public class HotswapPlugin extends Plugin
 				{
 					for (Plugin p : pluginManager.loadPlugins(classes, null))
 					{
-						try
-						{
-							// startPlugin self-gates on the persisted enabled flag, so a plugin that
-							// was off stays off and one that was on comes back up.
-							if (pluginManager.startPlugin(p))
-							{
-								started.add(p);
-							}
-						}
-						catch (Exception ex)
-						{
-							log.warn("Failed starting new {}", p.getClass().getSimpleName(), ex);
-						}
+						pluginManager.setPluginEnabled(p, false);
+						loaded[0]++;
 					}
 				}
 				catch (Exception ex)
@@ -296,7 +292,7 @@ public class HotswapPlugin extends Plugin
 				closeQuietly(previous);
 			}
 			jarPlugins.put(name, descriptors);
-			log.info("Reloaded {} — {} plugin(s), {} started", name, descriptors.size(), started.size());
+			log.info("Reloaded {} — {} plugin(s) loaded, {} disabled, none started", name, loaded[0], disabled[0]);
 		}
 		catch (Exception ex)
 		{
@@ -317,6 +313,10 @@ public class HotswapPlugin extends Plugin
 				{
 					if (names.contains(p.getClass().getName()))
 					{
+						if (pluginManager.isPluginEnabled(p) || pluginManager.isPluginActive(p))
+						{
+							pluginManager.setPluginEnabled(p, false);
+						}
 						try
 						{
 							pluginManager.stopPlugin(p);
