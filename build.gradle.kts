@@ -26,6 +26,32 @@ repositories {
     mavenCentral()
 }
 
+// --- Microbot client ----------------------------------------------------------
+//
+// We compile the plugins against — and launch — the Microbot client (a RuneLite fork)
+// instead of stock RuneLite, so plugins can use the Microbot automation API
+// (net.runelite.client.plugins.microbot.* — Rs2Walker, Rs2Bank, Rs2Npc, …) and the
+// built-in Agent Server MCP that ships inside the client.
+//
+// Rather than vendoring Microbot's sources, we reference its self-contained shadow jar:
+// a single fat artifact (full client runtime + Microbot API) built once in the Microbot
+// checkout with `./gradlew :client:shadowJar`. That sidesteps any maven coordinate
+// collision with stock RuneLite (both are net.runelite:client:1.12.28) and keeps this
+// repo a thin, plugin-authoring workspace. Point at a different checkout with
+// -PmicrobotDir=/abs/path; defaults to the sibling ../Microbot.
+val microbotDir = (findProperty("microbotDir") as String?) ?: "../Microbot"
+val microbotShadowJar = provider {
+    val libs = file("$microbotDir/runelite-client/build/libs")
+    libs.listFiles { f -> f.isFile && f.name.endsWith("-shaded.jar") }
+        ?.maxByOrNull { it.lastModified() }
+        ?: throw GradleException(
+            "Microbot client shadow jar not found under $libs.\n" +
+            "Build it once in the Microbot checkout:\n" +
+            "    (cd $microbotDir && ./gradlew :client:shadowJar)\n" +
+            "or point at another checkout with -PmicrobotDir=/abs/path/to/Microbot."
+        )
+}
+
 // Auto-discover plugins: every immediate subdirectory of plugins/ that ships Java
 // sources is one plugin. Adding a plugin is just dropping a folder here (see the
 // `newPlugin` task) — no edits to this build file are needed.
@@ -58,21 +84,10 @@ data class ExternalPlugin(
     val fetchTaskName get() = "fetch${key.replaceFirstChar { it.uppercaseChar() }}Source"
 }
 
-val externalPlugins = listOf(
-    // RuneLite Dev MCP: a read-only MCP server embedded in the plugin itself — it serves
-    // streamable HTTP/JSON-RPC on localhost:3000 from inside the client (com.sun.net.httpserver
-    // + gson, both already on the client runtime), so there is NO separate Node server to build
-    // and NO icon resource to copy (resourceSubdir = null).
-    ExternalPlugin(
-        key = "devmcp",
-        gitUrl = "https://github.com/runbunbun/runelite-dev-mcp.git",
-        branch = "main",
-        checkoutDir = "external/runelite-dev-mcp",
-        javaSubdir = "src/main/java",
-        resourceSubdir = null,
-        jarIncludes = listOf("dev/runelite/mcp/**"),
-    ),
-)
+// (none) — the Microbot client ships its own built-in Agent Server MCP, so the external
+// RuneLite Dev MCP is no longer fetched/compiled. The ExternalPlugin machinery is kept for
+// any future upstream plugin; add an entry here to re-enable fetching.
+val externalPlugins = emptyList<ExternalPlugin>()
 
 // Clone-or-update each external plugin's upstream sources to the latest commit on its
 // branch. Runs before compileJava (below), so `runClient` / `installPlugins` / `assemble`
@@ -138,7 +153,6 @@ fun pluginIncludes(key: String): List<String> {
 val jarNameOverrides = mapOf(
     "bankvaluer" to "bank-value-tracker",
     "loadouts" to "loadout-snapshots",
-    "devmcp" to "runelite-dev-mcp",
 )
 fun jarBaseName(key: String) = jarNameOverrides[key] ?: key
 
@@ -165,9 +179,10 @@ sourceSets {
 }
 
 dependencies {
-    // The client (and its transitive api deps: runelite-api, gson, guice, okhttp, slf4j, …) is
-    // provided by the running client, so compile-only is correct.
-    compileOnly("net.runelite:client:$runeliteVersion")
+    // The Microbot client (full runtime + Microbot API, bundled in its shadow jar) is
+    // provided at runtime by the launched client, so compile-only is correct. This is what
+    // exposes net.runelite.client.plugins.microbot.* (Rs2Walker, Rs2Bank, …) to plugins.
+    compileOnly(files(microbotShadowJar))
 
     compileOnly("org.projectlombok:lombok:$lombokVersion")
     annotationProcessor("org.projectlombok:lombok:$lombokVersion")
@@ -371,7 +386,7 @@ val newPlugin by tasks.registering {
 // client plus its transitive runtime deps (injected-client, lwjgl natives, logback,
 // guice, …). compileOnly above is only for building the thin plugin jars.
 dependencies {
-    "launcherImplementation"("net.runelite:client:$runeliteVersion")
+    "launcherImplementation"(files(microbotShadowJar))
 }
 
 // Builds + side-loads the plugins, then launches the real client via our dev.RuneLite
@@ -385,5 +400,22 @@ val runClient by tasks.registering(JavaExec::class) {
     dependsOn(installPlugins)
     mainClass.set("dev.RuneLite")
     classpath = sourceSets["launcher"].runtimeClasspath
-    jvmArgs("-ea")
+    // Launch on Java 17 (not the Gradle JVM). The Agent Server's UDS transport needs
+    // java.net.StandardProtocolFamily.UNIX, which only exists on Java 16+; on Java 11 the
+    // UDS bind fails and the server falls back to TCP. Java 17 + the args below mirror
+    // Microbot's own `run` task, which is how Microbot launches the client.
+    javaLauncher.set(
+        javaToolchains.launcherFor { languageVersion.set(JavaLanguageVersion.of(17)) }
+    )
+    // -ea is REQUIRED: RuneLite's injected client uses Java assertions as hooks.
+    // The --add-opens/--add-exports mirror the Microbot shadow jar's manifest (which
+    // only auto-applies under `java -jar`) so the macOS eawt fullscreen adapter loads
+    // when we launch via classpath instead.
+    jvmArgs(
+        "-ea",
+        "--add-opens", "java.desktop/com.apple.eawt=ALL-UNNAMED",
+        "--add-opens", "java.desktop/com.apple.eawt.event=ALL-UNNAMED",
+        "--add-exports", "java.desktop/com.apple.eawt=ALL-UNNAMED",
+        "--add-exports", "java.desktop/com.apple.eawt.event=ALL-UNNAMED",
+    )
 }

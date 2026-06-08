@@ -8,6 +8,7 @@ package net.runelite.client.plugins.hotswap;
 import com.google.inject.Provides;
 import java.io.File;
 import java.io.IOException;
+import java.lang.invoke.MethodHandles;
 import java.lang.reflect.InvocationTargetException;
 import java.net.URL;
 import java.net.URLClassLoader;
@@ -31,6 +32,7 @@ import net.runelite.client.events.ExternalPluginsChanged;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.plugins.PluginManager;
+import net.runelite.client.util.ReflectUtil;
 
 /**
  * Watches {@code ~/.runelite/sideloaded-plugins} and live-reloads any jar that changes,
@@ -216,7 +218,7 @@ public class HotswapPlugin extends Plugin
 		URLClassLoader loader = null;
 		try
 		{
-			loader = new URLClassLoader(new URL[]{jar.toURI().toURL()}, CORE);
+			loader = new LookupableLoader(new URL[]{jar.toURI().toURL()}, CORE);
 			final List<Class<?>> classes = loadJarClasses(jar, loader);
 			final Set<String> descriptors = classes.stream()
 				.filter(HotswapPlugin::isPlugin)
@@ -431,6 +433,42 @@ public class HotswapPlugin extends Plugin
 			catch (IOException ignored)
 			{
 			}
+		}
+	}
+
+	/**
+	 * Reload classloader that installs RuneLite's private-lookup helper, so a reloaded plugin's
+	 * {@code @Subscribe} methods can have their EventBus lambda dispatchers built on Java 16+.
+	 * Without it, {@code LambdaMetafactory} rejects the caller ("Invalid caller") and EventBus
+	 * falls back to reflection, logging a WARN per subscriber on every reload. Mirrors RuneLite's
+	 * {@code PluginHubClassLoader}.
+	 */
+	private static final class LookupableLoader extends URLClassLoader implements ReflectUtil.PrivateLookupableClassLoader
+	{
+		private MethodHandles.Lookup lookup;
+
+		LookupableLoader(URL[] urls, ClassLoader parent)
+		{
+			super(urls, parent);
+			ReflectUtil.installLookupHelper(this);
+		}
+
+		@Override
+		public Class<?> defineClass0(String name, byte[] b, int off, int len) throws ClassFormatError
+		{
+			return super.defineClass(name, b, off, len);
+		}
+
+		@Override
+		public MethodHandles.Lookup getLookup()
+		{
+			return lookup;
+		}
+
+		@Override
+		public void setLookup(MethodHandles.Lookup lookup)
+		{
+			this.lookup = lookup;
 		}
 	}
 }
