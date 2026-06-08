@@ -59,14 +59,18 @@ data class ExternalPlugin(
 }
 
 val externalPlugins = listOf(
+    // RuneLite Dev MCP: a read-only MCP server embedded in the plugin itself — it serves
+    // streamable HTTP/JSON-RPC on localhost:3000 from inside the client (com.sun.net.httpserver
+    // + gson, both already on the client runtime), so there is NO separate Node server to build
+    // and NO icon resource to copy (resourceSubdir = null).
     ExternalPlugin(
-        key = "osrsmcp",
-        gitUrl = "https://github.com/Sleepywalker69/OSRS-MCP-Companion.git",
-        branch = "master",
-        checkoutDir = "external/osrs-mcp-companion",
+        key = "devmcp",
+        gitUrl = "https://github.com/runbunbun/runelite-dev-mcp.git",
+        branch = "main",
+        checkoutDir = "external/runelite-dev-mcp",
         javaSubdir = "src/main/java",
-        resourceSubdir = "src/main/resources",
-        jarIncludes = listOf("com/osrscompanion/**"),
+        resourceSubdir = null,
+        jarIncludes = listOf("dev/runelite/mcp/**"),
     ),
 )
 
@@ -134,7 +138,7 @@ fun pluginIncludes(key: String): List<String> {
 val jarNameOverrides = mapOf(
     "bankvaluer" to "bank-value-tracker",
     "loadouts" to "loadout-snapshots",
-    "osrsmcp" to "osrs-mcp-companion",
+    "devmcp" to "runelite-dev-mcp",
 )
 fun jarBaseName(key: String) = jarNameOverrides[key] ?: key
 
@@ -201,10 +205,10 @@ val pluginJars = pluginKeys.map { key ->
     tasks.register<Jar>("${ext.key}Jar") {
         description = "Builds the sideloadable '${ext.key}' plugin jar (sources fetched from ${ext.gitUrl})."
         archiveBaseName.set(jarBaseName(ext.key))
-        // Ensure upstream is present even for a direct `./gradlew osrsmcpJar` (the icon
+        // Ensure upstream is present even for a direct `./gradlew <key>Jar` (the optional icon
         // copy below reads the freshly-fetched checkout, not the compile output).
         dependsOn(ext.fetchTaskName)
-        // Classes come from the shared compile output (package-based); resources (the icon)
+        // Classes come from the shared compile output (package-based); any resources (an icon)
         // come straight from upstream so the jar root matches upstream's layout.
         from(sourceSets.main.get().output) {
             ext.jarIncludes.forEach { include(it) }
@@ -361,66 +365,6 @@ val newPlugin by tasks.registering {
     }
 }
 
-// --- Build the OSRS MCP Companion node server ---------------------------------
-
-// Resolve the directory holding the node/npm executables. The IDE's Gradle run can
-// launch with a minimal PATH that omits nvm/homebrew (so a bare `npm` fails), while a
-// terminal run usually has them on PATH. Probe order: explicit -PnodeBin / NODE_BIN,
-// then nvm (most-recently-installed), homebrew, /usr/local. Returns null to fall back
-// to whatever the inherited PATH already provides.
-fun resolveNodeBinDir(): File? {
-    (providers.gradleProperty("nodeBin").orNull ?: System.getenv("NODE_BIN"))?.let {
-        val f = File(it)
-        if (f.exists()) return if (f.isDirectory) f else f.parentFile
-    }
-    val nvm = File(System.getProperty("user.home"), ".nvm/versions/node")
-        .listFiles { d -> File(d, "bin/node").exists() }
-        ?.maxByOrNull { it.lastModified() }       // most recently installed version
-        ?.let { File(it, "bin") }
-    return (listOfNotNull(nvm) + listOf(File("/opt/homebrew/bin"), File("/usr/local/bin")))
-        .firstOrNull { File(it, "node").exists() && File(it, "npm").exists() }
-}
-
-// The MCP server is TypeScript with a STDIO transport: it's spawned on demand by the MCP
-// client (Claude Desktop) over stdin/stdout, so we BUILD it here — never run it (a
-// standalone stdio server serves no client). Building it on the runClient path keeps the
-// copy Claude Desktop launches in sync with the freshly-fetched upstream sources. Not
-// packaged in any jar. npm install is gated on node_modules; tsc runs every time (fast).
-val buildOsrsmcpServer by tasks.registering {
-    group = "build setup"
-    description = "Builds the OSRS MCP Companion node server (npm install + tsc -> dist/index.js) for MCP clients like Claude Desktop."
-    dependsOn("fetchOsrsmcpSource")
-    doLast {
-        val serverDir = project.file("external/osrs-mcp-companion/mcp-server")
-        if (!File(serverDir, "package.json").exists()) {
-            throw GradleException("[osrsmcp] mcp-server/ not found — fetchOsrsmcpSource should have populated it.")
-        }
-        val nodeBin = resolveNodeBinDir()
-        fun npm(vararg a: String) = project.exec {
-            workingDir = serverDir
-            commandLine(listOf("npm") + a)
-            // Put the resolved node/npm dir first so npm (a node script) can find its node.
-            if (nodeBin != null) {
-                environment("PATH", nodeBin.path + File.pathSeparator + (System.getenv("PATH") ?: ""))
-            }
-            isIgnoreExitValue = true
-        }.exitValue
-        if (!File(serverDir, "node_modules").exists()) {
-            logger.lifecycle("[osrsmcp] Installing MCP server deps")
-            val code = if (File(serverDir, "package-lock.json").exists()) npm("ci") else npm("install")
-            if (code != 0) throw GradleException(
-                "[osrsmcp] npm install failed. Install Node.js (with npm), or point the build at it " +
-                "with -PnodeBin=/path/to/node/bin (or the NODE_BIN env var)."
-            )
-        }
-        logger.lifecycle("[osrsmcp] Building MCP server -> dist/index.js")
-        if (npm("run", "build") != 0) {
-            throw GradleException("[osrsmcp] MCP server build (tsc) failed — see output above.")
-        }
-        logger.lifecycle("[osrsmcp] MCP server ready: ${File(serverDir, "dist/index.js").path}")
-    }
-}
-
 // --- Run the RuneLite client from the IDE -------------------------------------
 
 // The launcher source set compiles + runs against the FULL client runtime: the
@@ -437,8 +381,8 @@ dependencies {
 // client uses Java assertions as hooks and won't run correctly without it.
 val runClient by tasks.registering(JavaExec::class) {
     group = "application"
-    description = "Launches RuneLite (developer mode) with these plugins side-loaded; also builds the OSRS MCP node server."
-    dependsOn(installPlugins, buildOsrsmcpServer)
+    description = "Launches RuneLite (developer mode) with these plugins side-loaded."
+    dependsOn(installPlugins)
     mainClass.set("dev.RuneLite")
     classpath = sourceSets["launcher"].runtimeClasspath
     jvmArgs("-ea")

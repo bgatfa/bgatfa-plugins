@@ -16,40 +16,38 @@ client itself is never vendored.
 
 Current plugins: **Bank Value Tracker** (`plugins/bankvaluer`, package
 `net.runelite.client.plugins.bankvaluer`), **Loadout Snapshots** (`plugins/loadouts`,
-package `net.runelite.client.plugins.loadouts`) and **OSRS MCP Companion** (package
-`com.osrscompanion` — a RuneLite plugin exposing live game state over a local HTTP API on
-`127.0.0.1:8085`, bridged to AI assistants by a TypeScript MCP server; sources **fetched at
-build time** from [Sleepywalker69/OSRS-MCP-Companion](https://github.com/Sleepywalker69/OSRS-MCP-Companion),
-BSD 2-Clause).
+package `net.runelite.client.plugins.loadouts`) and **RuneLite Dev MCP** (package
+`dev.runelite.mcp` — a read-only MCP server **embedded in the plugin**, serving streamable
+HTTP/JSON-RPC on `localhost:3000`; sources **fetched at build time** from
+[runbunbun/runelite-dev-mcp](https://github.com/runbunbun/runelite-dev-mcp)).
 
 ## External (fetched) plugins
 
-OSRS MCP Companion is **not** vendored, committed, or auto-discovered. Its upstream sources are
-cloned fresh into `external/osrs-mcp-companion/` (gitignored) by a Gradle `fetchOsrsmcpSource`
-task that runs **automatically before `compileJava`**, so every build compiles the latest
-upstream `master` — no git submodule, no init step, no pinned-commit churn. The checkout is
-mapped into the build explicitly via the `externalPlugins` list in `build.gradle.kts` (compiles
-`src/main/java` → `com/osrscompanion/**` into `osrs-mcp-companion.jar`, with the icon copied
-straight from `src/main/resources` — so upstream source ships unmodified). Repo-specific
-docs/screenshots for it still live in `plugins/osrsmcp/` (no `.java` there, so the `plugins/`
-scanner skips it).
+External plugin sources are **not** vendored, committed, or auto-discovered. They're cloned
+fresh into `external/<…>/` (gitignored) by a per-plugin Gradle `fetch<Key>Source` task that
+runs **automatically before `compileJava`**, so every build compiles the latest upstream HEAD —
+no git submodule, no init step, no pinned-commit churn. Each checkout is mapped into the build
+explicitly via the `externalPlugins` list in `build.gradle.kts` rather than auto-discovered.
 
-- **Always latest:** `fetchOsrsmcpSource` clones if the checkout is absent, otherwise
+- **Always latest:** `fetch<Key>Source` clones if the checkout is absent, otherwise
   `git fetch --depth 1` + `reset --hard` to upstream HEAD. It's a prerequisite of `compileJava`
-  and `osrsmcpJar`, so `assemble` / `installPlugins` / `runClient` (the "RuneLite (dev)" run
-  config) all pull the newest upstream with no extra step. This pairs with
+  and the plugin's jar task, so `assemble` / `installPlugins` / `runClient` (the "RuneLite (dev)"
+  run config) all pull the newest upstream with no extra step. This pairs with
   `runeliteVersion=latest.release`: newest plugin source against the newest client.
 - **Offline:** if upstream is unreachable but a checkout already exists, the build warns and
   uses what's on disk; only a missing checkout with no network is a hard failure. Nothing to
   commit — the source is never tracked here.
-- The upstream `mcp-server/` (TypeScript) is not packaged into any jar. It's built by the Gradle
-  `buildOsrsmcpServer` task (`npm install` once + `tsc` → `dist/index.js`), which `runClient`
-  (the "RuneLite (dev)" run config) runs automatically against the freshly-fetched source. It's
-  a **stdio** MCP server, so it's only ever *built* here — the MCP client (Claude Desktop, Claude
-  Code) spawns it on demand; never run it standalone. `node`/`npm` are auto-detected from
-  nvm/homebrew (override via `-PnodeBin=` or `NODE_BIN`). `.mcp.json` points Claude Code at its
-  `dist/index.js`; Claude Desktop is registered in
-  `~/Library/Application Support/Claude/claude_desktop_config.json` (absolute node + entry path).
+
+**RuneLite Dev MCP** is the sole external plugin (`fetchDevmcpSource` → `external/runelite-dev-mcp/`,
+gitignored; `src/main/java` → `dev/runelite/mcp/**` into `runelite-dev-mcp.jar`). Its MCP server is
+**embedded in the Java plugin** as a `com.sun.net.httpserver` HTTP server — there's no separate Node
+server to build, and it ships **no icon resource** (`resourceSubdir = null`). The plugin starts the
+server on `localhost:3000` (config: port) when enabled. Because the transport is **streamable HTTP**
+(not stdio), Claude Desktop — whose JSON config is stdio-only — reaches it via the `mcp-remote` shim:
+`runelite-dev-mcp` → `npx -y mcp-remote http://localhost:3000/mcp` in
+`~/Library/Application Support/Claude/claude_desktop_config.json`. Claude Code can instead connect
+natively: `claude mcp add --transport http runelite-dev-mcp http://localhost:3000/mcp`. The server
+only answers while RuneLite is running with the plugin enabled.
 
 > Auto-discovery handles any package layout — a plugin folder is any subdir of `plugins/`
 > that ships `.java`, and each thin jar is filtered to its own package root — so a plugin
