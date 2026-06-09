@@ -3,7 +3,7 @@
  * All rights reserved. Redistribution and use in source and binary forms, with
  * or without modification, are permitted provided the copyright notice is kept.
  */
-package net.runelite.client.plugins.topwithdraw;
+package net.runelite.client.plugins.bankcleaner;
 
 import com.google.inject.Provides;
 import java.util.ArrayList;
