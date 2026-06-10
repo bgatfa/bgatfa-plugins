@@ -41,11 +41,19 @@ import net.runelite.client.ui.overlay.OverlayManager;
 	name = "Bank Cleaner",
 	description = "Cleans out your bank and dumps it into the Grand Exchange.",
 	tags = {"bank", "ge", "value", "noted", "liquidate"},
-	enabledByDefault = false
+	authors = {"bgatfa"},
+	version = BankCleanerPlugin.version,
+	minClientVersion = "2.0.61",
+	iconUrl = "",
+	cardUrl = "",
+	enabledByDefault = false,
+	isExternal = true
 )
 @Slf4j
 public class BankCleanerPlugin extends Plugin
 {
+	public static final String version = "1.0.0";
+
 	private static final int COINS_ID = 995;
 	private static final int SELL_PRICE_GP = 1;
 	private static final int GE_SLOT_COUNT = 8;

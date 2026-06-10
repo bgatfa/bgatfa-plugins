@@ -22,10 +22,18 @@ import net.runelite.client.ui.overlay.OverlayManager;
 	name = "Bank Organizer",
 	description = "Organizes real bank tabs from practical item categories.",
 	tags = {"bank", "organizer", "tabs", "sort"},
-	enabledByDefault = false
+	authors = {"bgatfa"},
+	version = BankOrganizerPlugin.version,
+	minClientVersion = "2.0.61",
+	iconUrl = "",
+	cardUrl = "",
+	enabledByDefault = false,
+	isExternal = true
 )
 public class BankOrganizerPlugin extends Plugin
 {
+	public static final String version = "1.0.0";
+
 	@Inject
 	private BankOrganizerConfig config;
 
@@ -136,6 +144,17 @@ public class BankOrganizerPlugin extends Plugin
 			if (!actuator.ensureBankOpen())
 			{
 				throw new IllegalStateException("Could not open bank.");
+			}
+			if (stopRequested)
+			{
+				return;
+			}
+
+			overlayState = OverlayState.running("Mode", "Checking bank rearrange mode.");
+			BankActuator.ActuatorResult insertMode = actuator.ensureBankInsertMode();
+			if (!insertMode.success())
+			{
+				throw new IllegalStateException(insertMode.message());
 			}
 			if (stopRequested)
 			{

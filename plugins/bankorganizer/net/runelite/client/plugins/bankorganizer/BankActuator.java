@@ -9,8 +9,10 @@ import java.awt.Rectangle;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import javax.inject.Inject;
 import net.runelite.api.Client;
 import net.runelite.api.Varbits;
@@ -20,9 +22,12 @@ import net.runelite.client.plugins.microbot.util.Global;
 import net.runelite.client.plugins.microbot.util.bank.Rs2Bank;
 import net.runelite.client.plugins.microbot.util.inventory.Rs2ItemModel;
 import net.runelite.client.plugins.microbot.util.misc.Rs2UiHelper;
+import net.runelite.client.plugins.microbot.util.widget.Rs2Widget;
 
 final class BankActuator
 {
+	private static final int BANK_GROUP_ID = 12;
+	private static final int BANK_INSERT_BUTTON_CHILD_ID = 17;
 	private static final int BANK_TAB_CONTAINER_DYNAMIC_MAIN_INDEX = 10;
 	private static final int[] TAB_COUNT_VARBITS = {
 		Varbits.BANK_TAB_ONE_COUNT,
@@ -53,6 +58,33 @@ final class BankActuator
 			return true;
 		}
 		return Rs2Bank.openBank() && Global.sleepUntil(Rs2Bank::isOpen, 5000);
+	}
+
+	boolean isBankInsertMode()
+	{
+		return bankRearrangeMode() == 1;
+	}
+
+	ActuatorResult ensureBankInsertMode()
+	{
+		if (!ensureBankOpen())
+		{
+			return ActuatorResult.fail("Bank is not open.");
+		}
+		if (isBankInsertMode())
+		{
+			return ActuatorResult.ok("Bank rearrange mode is already Insert.");
+		}
+
+		if (!Rs2Widget.clickWidget(BANK_GROUP_ID, BANK_INSERT_BUTTON_CHILD_ID))
+		{
+			return ActuatorResult.fail("Could not click bank Insert mode.");
+		}
+
+		boolean verified = Global.sleepUntil(this::isBankInsertMode, 2500);
+		return verified
+			? ActuatorResult.ok("Bank rearrange mode set to Insert.")
+			: ActuatorResult.fail("Bank rearrange mode did not switch to Insert.");
 	}
 
 	ActuatorResult openMainTab()
@@ -275,18 +307,19 @@ final class BankActuator
 		{
 			return FullOrganizeResult.fail("No layout plan was provided.", safeSnapshot(), 0, 0);
 		}
+		ActuatorResult insertMode = ensureBankInsertMode();
+		if (!insertMode.success())
+		{
+			return FullOrganizeResult.fail(insertMode.message(), safeSnapshot(), 0, 0);
+		}
 
 		BankSnapshot baseline = snapshotReader.read();
 		int originalCount = baseline.stackCount();
 		Map<Integer, Integer> originalQuantities = quantityMap(baseline);
 		int createdTabs = 0;
 		int moved = 0;
+		int sorted = 0;
 		List<String> steps = new ArrayList<>();
-		if (plan.actions().isEmpty())
-		{
-			return FullOrganizeResult.ok("No layout moves needed. Listed items are already in their target tabs.",
-				baseline, 0, 0);
-		}
 
 		Map<Integer, List<BankTagLayoutMoveAction>> actionsByTab = layoutActionsByTargetTab(plan.actions());
 		List<BankTagLayoutMoveAction> mainActions = actionsByTab.get(0);
@@ -391,6 +424,21 @@ final class BankActuator
 			}
 		}
 
+		for (BankTagLayoutTab tab : plan.tabs())
+		{
+			if (Thread.currentThread().isInterrupted())
+			{
+				return FullOrganizeResult.fail("Layout sort interrupted.", safeSnapshot(), createdTabs, moved + sorted);
+			}
+
+			SortResult sort = sortTabByLayout(tab, originalCount, originalQuantities);
+			if (!sort.success())
+			{
+				return FullOrganizeResult.fail(sort.message(), safeSnapshot(), createdTabs, moved + sorted);
+			}
+			sorted += sort.moves();
+		}
+
 		BankSnapshot finalSnapshot = snapshotReader.read();
 		String verificationError = verifySnapshotUnchanged(originalCount, originalQuantities, finalSnapshot);
 		if (verificationError != null)
@@ -398,8 +446,110 @@ final class BankActuator
 			return FullOrganizeResult.fail(verificationError, finalSnapshot, createdTabs, moved);
 		}
 
-		return FullOrganizeResult.ok("Layout delta moved " + moved + " stacks and created " + createdTabs
-			+ " missing tabs. Bank count/quantities verified.", finalSnapshot, createdTabs, moved);
+		return FullOrganizeResult.ok("Layout delta moved " + moved + " stacks, sorted " + sorted
+			+ " positions, and created " + createdTabs
+			+ " missing tabs. Bank count/quantities verified.", finalSnapshot, createdTabs, moved + sorted);
+	}
+
+	private SortResult sortTabByLayout(
+		BankTagLayoutTab tab,
+		int originalCount,
+		Map<Integer, Integer> originalQuantities)
+	{
+		if (tabCount(tab.tabIndex()) <= 0)
+		{
+			return SortResult.ok("Tab " + tab.tabIndex() + " does not exist; no sort needed.", 0);
+		}
+
+		ActuatorResult open = openTab(tab.tabIndex());
+		if (!open.success())
+		{
+			return SortResult.fail(open.message(), 0);
+		}
+
+		ActuatorResult insertMode = ensureBankInsertMode();
+		if (!insertMode.success())
+		{
+			return SortResult.fail(insertMode.message(), 0);
+		}
+
+		int moves = 0;
+		for (int targetPosition = 0; ; targetPosition++)
+		{
+			BankSnapshot snapshot = snapshotReader.read();
+			List<BankSnapshot.BankStack> tabStacks = tabStacks(snapshot, tab.tabIndex());
+			List<Integer> desiredPresent = desiredPresentItemIds(tab, tabStacks);
+			if (targetPosition >= desiredPresent.size())
+			{
+				return SortResult.ok("Sorted tab " + tab.tabIndex() + ".", moves);
+			}
+
+			int desiredItemId = desiredPresent.get(targetPosition);
+			if (targetPosition >= tabStacks.size())
+			{
+				return SortResult.fail("Tab " + tab.tabIndex() + " has fewer stacks than expected while sorting.", moves);
+			}
+			if (tabStacks.get(targetPosition).itemId() == desiredItemId)
+			{
+				continue;
+			}
+
+			int sourcePosition = indexOfItemId(tabStacks, desiredItemId);
+			if (sourcePosition < 0)
+			{
+				return SortResult.fail("Could not find item " + desiredItemId + " in tab " + tab.tabIndex()
+					+ " while sorting.", moves);
+			}
+			if (sourcePosition < targetPosition)
+			{
+				return SortResult.fail("Sorting prefix drifted in tab " + tab.tabIndex() + ".", moves);
+			}
+
+			BankSnapshot.BankStack source = tabStacks.get(sourcePosition);
+			BankSnapshot.BankStack target = tabStacks.get(targetPosition);
+			ActuatorResult drag = dragItemWithinOpenTab(source, target);
+			if (!drag.success())
+			{
+				return SortResult.fail("Tab " + tab.tabIndex() + ": " + drag.message(), moves);
+			}
+			moves++;
+
+			int verifiedPrefixLength = targetPosition + 1;
+			boolean sortedPrefix = Global.sleepUntil(() -> {
+				BankSnapshot afterMove = snapshotReader.read();
+				return verifySnapshotUnchanged(originalCount, originalQuantities, afterMove) == null
+					&& isOrderedPrefix(afterMove, tab, verifiedPrefixLength);
+			}, 5000);
+			if (!sortedPrefix)
+			{
+				BankSnapshot afterMove = snapshotReader.read();
+				String unchangedError = verifySnapshotUnchanged(originalCount, originalQuantities, afterMove);
+				if (unchangedError != null)
+				{
+					return SortResult.fail("After sorting tab " + tab.tabIndex() + ": " + unchangedError, moves);
+				}
+				return SortResult.fail("Tab " + tab.tabIndex() + " order was not verified after moving "
+					+ source.name() + ".", moves);
+			}
+		}
+	}
+
+	private static ActuatorResult dragItemWithinOpenTab(BankSnapshot.BankStack sourceStack, BankSnapshot.BankStack targetStack)
+	{
+		if (!Rs2Bank.scrollBankToSlot(sourceStack.slot()))
+		{
+			return ActuatorResult.fail("Could not scroll source item into view.");
+		}
+
+		Rectangle source = Rs2Bank.getItemBounds(sourceStack.slot());
+		Rectangle target = Rs2Bank.getItemBounds(targetStack.slot());
+		if (!inCanvas(source) || !inCanvas(target))
+		{
+			return ActuatorResult.fail("Source or target slot bounds were outside the canvas.");
+		}
+
+		Microbot.drag(source, target);
+		return ActuatorResult.ok("Inserted " + sourceStack.name() + " before " + targetStack.name() + ".");
 	}
 
 	int realTabCount()
@@ -423,6 +573,12 @@ final class BankActuator
 		}
 		return Microbot.getClientThread().runOnClientThreadOptional(() ->
 			client.getVarbitValue(TAB_COUNT_VARBITS[tabIndex - 1])).orElse(0);
+	}
+
+	int bankRearrangeMode()
+	{
+		return Microbot.getClientThread().runOnClientThreadOptional(() ->
+			client.getVarbitValue(Varbits.BANK_REARRANGE_MODE)).orElse(-1);
 	}
 
 	int quantityFor(int itemId)
@@ -502,6 +658,70 @@ final class BankActuator
 		return actionsByTab;
 	}
 
+	private static List<BankSnapshot.BankStack> tabStacks(BankSnapshot snapshot, int tabIndex)
+	{
+		List<BankSnapshot.BankStack> stacks = new ArrayList<>();
+		for (BankSnapshot.BankStack stack : snapshot.items())
+		{
+			if (stack.tab() == tabIndex)
+			{
+				stacks.add(stack);
+			}
+		}
+		stacks.sort(Comparator.comparingInt(BankSnapshot.BankStack::allItemsIndex));
+		return stacks;
+	}
+
+	private static List<Integer> desiredPresentItemIds(BankTagLayoutTab tab, List<BankSnapshot.BankStack> tabStacks)
+	{
+		Set<Integer> present = new HashSet<>();
+		for (BankSnapshot.BankStack stack : tabStacks)
+		{
+			present.add(stack.itemId());
+		}
+
+		List<Integer> desired = new ArrayList<>();
+		Set<Integer> added = new HashSet<>();
+		for (int itemId : tab.orderedItemIds())
+		{
+			if (present.contains(itemId) && added.add(itemId))
+			{
+				desired.add(itemId);
+			}
+		}
+		return desired;
+	}
+
+	private static int indexOfItemId(List<BankSnapshot.BankStack> stacks, int itemId)
+	{
+		for (int i = 0; i < stacks.size(); i++)
+		{
+			if (stacks.get(i).itemId() == itemId)
+			{
+				return i;
+			}
+		}
+		return -1;
+	}
+
+	private static boolean isOrderedPrefix(BankSnapshot snapshot, BankTagLayoutTab tab, int prefixLength)
+	{
+		List<BankSnapshot.BankStack> stacks = tabStacks(snapshot, tab.tabIndex());
+		List<Integer> desired = desiredPresentItemIds(tab, stacks);
+		if (desired.size() < prefixLength || stacks.size() < prefixLength)
+		{
+			return false;
+		}
+		for (int i = 0; i < prefixLength; i++)
+		{
+			if (stacks.get(i).itemId() != desired.get(i))
+			{
+				return false;
+			}
+		}
+		return true;
+	}
+
 	private static String verifySnapshotUnchanged(int expectedCount, Map<Integer, Integer> expectedQuantities, BankSnapshot snapshot)
 	{
 		if (snapshot.stackCount() != expectedCount)
@@ -545,6 +765,45 @@ final class BankActuator
 		String message()
 		{
 			return message;
+		}
+	}
+
+	private static final class SortResult
+	{
+		private final boolean success;
+		private final String message;
+		private final int moves;
+
+		private SortResult(boolean success, String message, int moves)
+		{
+			this.success = success;
+			this.message = message;
+			this.moves = moves;
+		}
+
+		static SortResult ok(String message, int moves)
+		{
+			return new SortResult(true, message, moves);
+		}
+
+		static SortResult fail(String message, int moves)
+		{
+			return new SortResult(false, message, moves);
+		}
+
+		boolean success()
+		{
+			return success;
+		}
+
+		String message()
+		{
+			return message;
+		}
+
+		int moves()
+		{
+			return moves;
 		}
 	}
 

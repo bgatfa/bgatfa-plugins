@@ -7,6 +7,8 @@
  * resources only — every shared library is provided by the client at runtime).
  */
 
+import java.io.ByteArrayOutputStream
+
 plugins {
     `java-library`
 }
@@ -155,6 +157,410 @@ val jarNameOverrides = mapOf(
     "loadouts" to "loadout-snapshots",
 )
 fun jarBaseName(key: String) = jarNameOverrides[key] ?: key
+
+// --- Publish selected plugins into Microbot-Hub ------------------------------
+
+// These tasks port a local plugin into the Microbot-Hub source/resource layout,
+// validate that plugin in the Hub checkout, and optionally commit/push it.
+// They are deliberately opt-in per plugin so experimental/local helpers never get
+// published just because they live under plugins/.
+data class HubPluginPublication(
+    val key: String,
+    val taskStem: String,
+    val defaultVersion: String = "1.0.0",
+    val minClientVersion: String = "2.0.61",
+)
+
+val hubPluginPublications = listOf(
+    HubPluginPublication("bankorganizer", "BankOrganizer"),
+    HubPluginPublication("bankcleaner", "BankCleaner"),
+)
+
+fun hubBoolProperty(name: String, default: Boolean): Boolean =
+    providers.gradleProperty(name).orNull?.toBooleanStrictOrNull() ?: default
+
+fun runCommand(
+    command: List<String>,
+    workingDir: File = projectDir,
+    ignoreExitValue: Boolean = false,
+): String {
+    val output = ByteArrayOutputStream()
+    val result = exec {
+        this.workingDir = workingDir
+        commandLine(command)
+        standardOutput = output
+        errorOutput = output
+        isIgnoreExitValue = true
+    }
+    val text = output.toString(Charsets.UTF_8.name()).trim()
+    if (!ignoreExitValue && result.exitValue != 0) {
+        throw GradleException("Command failed (${command.joinToString(" ")}):\n$text")
+    }
+    return text
+}
+
+fun pascalWords(value: String): String =
+    Regex("[A-Za-z0-9]+").findAll(value)
+        .joinToString("") { match -> match.value.replaceFirstChar { it.uppercaseChar() } }
+
+fun readJavaPackages(files: List<File>): List<String> {
+    val packageRegex = Regex("""(?m)^package\s+([A-Za-z0-9_.]+);""")
+    return files.mapNotNull { file ->
+        packageRegex.find(file.readText())?.groupValues?.get(1)
+    }
+}
+
+fun commonPackagePrefix(packages: List<String>): String {
+    if (packages.isEmpty()) {
+        return ""
+    }
+    var prefix = packages.first()
+    packages.drop(1).forEach { pkg ->
+        while (prefix.isNotEmpty() && pkg != prefix && !pkg.startsWith("$prefix.")) {
+            prefix = prefix.substringBeforeLast('.', "")
+        }
+    }
+    return prefix
+}
+
+fun findAnnotationClose(content: String, annotationStart: Int): Int {
+    val open = content.indexOf('(', annotationStart)
+    if (open < 0) {
+        throw GradleException("Could not find @PluginDescriptor opening parenthesis.")
+    }
+    var depth = 0
+    var inString = false
+    var escaped = false
+    for (i in open until content.length) {
+        val ch = content[i]
+        if (inString) {
+            if (escaped) {
+                escaped = false
+            } else if (ch == '\\') {
+                escaped = true
+            } else if (ch == '"') {
+                inString = false
+            }
+            continue
+        }
+        when (ch) {
+            '"' -> inString = true
+            '(' -> depth++
+            ')' -> {
+                depth--
+                if (depth == 0) {
+                    return i
+                }
+            }
+        }
+    }
+    throw GradleException("Could not find @PluginDescriptor closing parenthesis.")
+}
+
+fun readDescriptorString(descriptorArgs: String, field: String, fallback: String): String =
+    Regex("""\b${Regex.escape(field)}\s*=\s*"([^"]*)"""")
+        .find(descriptorArgs)
+        ?.groupValues
+        ?.get(1)
+        ?: fallback
+
+fun readDescriptorTags(descriptorArgs: String): String =
+    Regex("""\btags\s*=\s*\{([^}]*)}""", RegexOption.DOT_MATCHES_ALL)
+        .find(descriptorArgs)
+        ?.groupValues
+        ?.get(1)
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() }
+        ?: "\"microbot\""
+
+fun localAssetExists(pluginDir: File, fileName: String): Boolean =
+    pluginDir.walkTopDown().any {
+        it.isFile && it.name.equals(fileName, ignoreCase = true) &&
+            (it.parentFile.name == "images" || it.parentFile.name == "assets")
+    }
+
+fun copyHubPluginToCheckout(publication: HubPluginPublication, hubDir: File) {
+    val pluginDir = File(pluginsRoot, publication.key)
+    if (!pluginDir.isDirectory) {
+        throw GradleException("Plugin '${publication.key}' does not exist at ${pluginDir.path}.")
+    }
+
+    val javaFiles = pluginDir.walkTopDown()
+        .filter { it.isFile && it.extension == "java" }
+        .toList()
+    if (javaFiles.isEmpty()) {
+        throw GradleException("Plugin '${publication.key}' has no Java sources.")
+    }
+
+    val packages = readJavaPackages(javaFiles)
+    val expectedStandalonePackage = "net.runelite.client.plugins.${publication.key}"
+    val oldBasePackage = if (packages.isNotEmpty() && packages.all { it == expectedStandalonePackage || it.startsWith("$expectedStandalonePackage.") }) {
+        expectedStandalonePackage
+    } else {
+        commonPackagePrefix(packages)
+    }
+    if (oldBasePackage.isBlank()) {
+        throw GradleException("Could not infer Java package for plugin '${publication.key}'.")
+    }
+
+    val hubBasePackage = "net.runelite.client.plugins.microbot.${publication.key}"
+    val hubJavaRoot = hubDir.resolve("src/main/java/net/runelite/client/plugins/microbot")
+    val hubResourceRoot = hubDir.resolve("src/main/resources/net/runelite/client/plugins/microbot")
+    val hubPluginJavaDir = hubJavaRoot.resolve(publication.key)
+    val hubPluginResourceDir = hubResourceRoot.resolve(publication.key)
+
+    if (!hubPluginJavaDir.canonicalPath.startsWith(hubJavaRoot.canonicalPath + File.separator)) {
+        throw GradleException("Refusing to write outside Hub plugin source root: $hubPluginJavaDir")
+    }
+    if (!hubPluginResourceDir.canonicalPath.startsWith(hubResourceRoot.canonicalPath + File.separator)) {
+        throw GradleException("Refusing to write outside Hub plugin resource root: $hubPluginResourceDir")
+    }
+
+    hubPluginJavaDir.deleteRecursively()
+    hubPluginResourceDir.deleteRecursively()
+    hubPluginJavaDir.mkdirs()
+
+    val pluginClassFile = javaFiles.singleOrNull { it.name.endsWith("Plugin.java") }
+        ?: throw GradleException("Expected exactly one *Plugin.java under ${pluginDir.path}.")
+    val pluginClassName = pluginClassFile.name.removeSuffix(".java")
+
+    javaFiles.forEach { sourceFile ->
+        var content = sourceFile.readText()
+            .replace(oldBasePackage, hubBasePackage)
+
+        if (sourceFile == pluginClassFile) {
+            content = configureHubPluginDescriptor(
+                content = content,
+                className = pluginClassName,
+                pluginDir = pluginDir,
+                publication = publication,
+            )
+        }
+
+        val currentPackage = Regex("""(?m)^package\s+([A-Za-z0-9_.]+);""")
+            .find(content)
+            ?.groupValues
+            ?.get(1)
+            ?: hubBasePackage
+        val packagePath = currentPackage.removePrefix(hubBasePackage)
+            .trimStart('.')
+            .replace('.', File.separatorChar)
+        val targetDir = if (packagePath.isBlank()) hubPluginJavaDir else hubPluginJavaDir.resolve(packagePath)
+        targetDir.mkdirs()
+        targetDir.resolve(sourceFile.name).writeText(content)
+    }
+
+    writeHubPluginDocs(publication, pluginDir, hubPluginResourceDir, pluginClassName)
+}
+
+fun configureHubPluginDescriptor(
+    content: String,
+    className: String,
+    pluginDir: File,
+    publication: HubPluginPublication,
+): String {
+    val descriptorStart = content.indexOf("@PluginDescriptor(")
+    if (descriptorStart < 0) {
+        throw GradleException("Missing @PluginDescriptor in $className.")
+    }
+    val descriptorEnd = findAnnotationClose(content, descriptorStart)
+    val descriptorArgs = content.substring(content.indexOf('(', descriptorStart) + 1, descriptorEnd)
+    val displayName = readDescriptorString(descriptorArgs, "name", pascalWords(publication.key))
+    val description = readDescriptorString(descriptorArgs, "description", displayName)
+    val tags = readDescriptorTags(descriptorArgs)
+    val iconUrl = if (localAssetExists(pluginDir, "icon.png")) {
+        "https://bgatfa.github.io/Microbot-Hub/${className}/assets/icon.png"
+    } else {
+        ""
+    }
+    val cardUrl = if (localAssetExists(pluginDir, "card.png")) {
+        "https://bgatfa.github.io/Microbot-Hub/${className}/assets/card.png"
+    } else {
+        ""
+    }
+
+    val descriptor = """
+        @PluginDescriptor(
+        	name = PluginConstants.BGA + "$displayName",
+        	description = "$description",
+        	tags = {$tags},
+        	authors = {"bgatfa"},
+        	version = ${className}.version,
+        	minClientVersion = "${publication.minClientVersion}",
+        	iconUrl = "$iconUrl",
+        	cardUrl = "$cardUrl",
+        	enabledByDefault = PluginConstants.DEFAULT_ENABLED,
+        	isExternal = PluginConstants.IS_EXTERNAL
+        )
+    """.trimIndent()
+
+    var updated = content.substring(0, descriptorStart) + descriptor + content.substring(descriptorEnd + 1)
+    if (!updated.contains("import net.runelite.client.plugins.microbot.PluginConstants;")) {
+        updated = updated.replaceFirst(
+            Regex("""(?m)^(package\s+[A-Za-z0-9_.]+;\s*)$"""),
+            "$1\nimport net.runelite.client.plugins.microbot.PluginConstants;\n"
+        )
+    }
+    if (!Regex("""\bstatic\s+(?:final\s+)?String\s+version\s*=""").containsMatchIn(updated)) {
+        updated = updated.replaceFirst(
+            Regex("""(?s)(public\s+class\s+${Regex.escape(className)}[^{]*\{)(\s*)"""),
+            "$1\n\tpublic static final String version = \"${publication.defaultVersion}\";\n$2"
+        )
+    }
+    return updated
+}
+
+fun writeHubPluginDocs(
+    publication: HubPluginPublication,
+    pluginDir: File,
+    hubPluginResourceDir: File,
+    pluginClassName: String,
+) {
+    val docsDir = hubPluginResourceDir.resolve("docs")
+    val assetsDir = docsDir.resolve("assets")
+    assetsDir.mkdirs()
+
+    val localReadme = listOf(
+        pluginDir.resolve("README.md"),
+        pluginDir.resolve("images/README.md"),
+    ).firstOrNull { it.isFile }
+
+    if (localReadme != null) {
+        localReadme.copyTo(docsDir.resolve("README.md"), overwrite = true)
+    } else {
+        val title = Regex("([a-z])([A-Z])").replace(pluginClassName.removeSuffix("Plugin"), "$1 $2")
+        val readmeLines = mutableListOf(
+            "# $title",
+            "",
+            if (publication.key == "bankorganizer") {
+                "Organizes bank tabs from configured item layouts."
+            } else {
+                "Processes bank items for Grand Exchange liquidation."
+            },
+            "",
+            "## Setup",
+            "",
+            "Enable the plugin from Microbot Hub, configure the available options, and start it only after confirming the bank state is ready.",
+        )
+        if (publication.key == "bankcleaner") {
+            readmeLines += listOf(
+                "",
+                "## Safety",
+                "",
+                "This plugin sells eligible bank items through the Grand Exchange. Review the configuration and exclusions before starting it.",
+            )
+        }
+        docsDir.resolve("README.md").writeText(readmeLines.joinToString("\n") + "\n")
+    }
+
+    listOf(pluginDir.resolve("images"), pluginDir.resolve("assets")).forEach { assetSource ->
+        if (assetSource.isDirectory) {
+            copy {
+                from(assetSource) {
+                    include("**/*.png", "**/*.jpg", "**/*.jpeg", "**/*.gif")
+                }
+                into(assetsDir)
+            }
+        }
+    }
+}
+
+fun prepareHubCheckout(hubDir: File, hubGitUrl: String, hubBranch: String) {
+    if (hubDir.resolve(".git").isDirectory) {
+        val dirty = runCommand(listOf("git", "status", "--porcelain"), hubDir)
+        if (dirty.isNotBlank() && !hubBoolProperty("hubAllowDirty", false)) {
+            throw GradleException(
+                "Hub checkout has uncommitted changes at ${hubDir.path}.\n" +
+                "Commit/stash them first, or re-run with -PhubAllowDirty=true if you want the task to proceed."
+            )
+        }
+        runCommand(listOf("git", "fetch", "origin", hubBranch), hubDir)
+        runCommand(listOf("git", "checkout", hubBranch), hubDir)
+        runCommand(listOf("git", "pull", "--ff-only", "origin", hubBranch), hubDir)
+    } else {
+        if (hubDir.exists() && hubDir.listFiles()?.isNotEmpty() == true) {
+            throw GradleException("${hubDir.path} exists but is not a git checkout.")
+        }
+        hubDir.parentFile?.mkdirs()
+        runCommand(listOf("git", "clone", "--branch", hubBranch, hubGitUrl, hubDir.path))
+    }
+}
+
+hubPluginPublications.forEach { publication ->
+    val pluginClassName = "${publication.taskStem}Plugin"
+    tasks.register("publish${publication.taskStem}ToHub") {
+        group = "publishing"
+        description = "Ports ${publication.key} into bgatfa/Microbot-Hub, validates it, and optionally commits/pushes it."
+
+        doLast {
+            val hubGitUrl = providers.gradleProperty("hubGitUrl").orNull
+                ?: "https://github.com/bgatfa/Microbot-Hub.git"
+            val hubDir = file(providers.gradleProperty("hubDir").orNull ?: "../Microbot-Hub")
+            val hubBranch = providers.gradleProperty("hubBranch").orNull ?: "development"
+            val hubRemote = providers.gradleProperty("hubRemote").orNull ?: "origin"
+            val hubCommit = hubBoolProperty("hubCommit", true)
+            val hubPush = hubBoolProperty("hubPush", false)
+            val hubMicrobotClientVersion = providers.gradleProperty("hubMicrobotClientVersion").orNull
+            val hubMicrobotClientPath = providers.gradleProperty("hubMicrobotClientPath").orNull
+                ?: if (hubMicrobotClientVersion.isNullOrBlank()) {
+                    runCatching { microbotShadowJar.get().absolutePath }.getOrNull()
+                } else {
+                    null
+                }
+
+            prepareHubCheckout(hubDir, hubGitUrl, hubBranch)
+            copyHubPluginToCheckout(publication, hubDir)
+
+            val gradlew = if (org.gradle.internal.os.OperatingSystem.current().isWindows) "gradlew.bat" else "./gradlew"
+            val compileTaskName = "compile${publication.key.replaceFirstChar { it.uppercaseChar() }}Java"
+            val clientArg = when {
+                !hubMicrobotClientPath.isNullOrBlank() -> "-PmicrobotClientPath=$hubMicrobotClientPath"
+                !hubMicrobotClientVersion.isNullOrBlank() -> "-PmicrobotClientVersion=$hubMicrobotClientVersion"
+                else -> "-PmicrobotClientVersion=${publication.minClientVersion}"
+            }
+            runCommand(
+                listOf(
+                    gradlew,
+                    "clean",
+                    compileTaskName,
+                    "-PpluginList=$pluginClassName",
+                    clientArg,
+                ),
+                hubDir,
+            )
+
+            val sourcePath = "src/main/java/net/runelite/client/plugins/microbot/${publication.key}"
+            val resourcePath = "src/main/resources/net/runelite/client/plugins/microbot/${publication.key}"
+            runCommand(listOf("git", "add", sourcePath, resourcePath), hubDir)
+
+            val staged = runCommand(listOf("git", "diff", "--cached", "--name-only"), hubDir)
+            if (staged.isBlank()) {
+                logger.lifecycle("[${publication.key}] Hub checkout already matches the generated plugin.")
+                return@doLast
+            }
+
+            if (hubCommit) {
+                runCommand(listOf("git", "commit", "-m", "Publish ${publication.taskStem} plugin"), hubDir)
+                logger.lifecycle("[${publication.key}] Committed Hub changes in ${hubDir.path}.")
+            } else {
+                logger.lifecycle("[${publication.key}] Changes are staged in ${hubDir.path}; commit disabled by -PhubCommit=false.")
+            }
+
+            if (hubPush) {
+                runCommand(listOf("git", "push", hubRemote, hubBranch), hubDir)
+                logger.lifecycle("[${publication.key}] Pushed to $hubRemote/$hubBranch.")
+            } else {
+                logger.lifecycle("[${publication.key}] Re-run with -PhubPush=true to push to $hubRemote/$hubBranch.")
+            }
+        }
+    }
+}
+
+tasks.register("publishBankClearToHub") {
+    group = "publishing"
+    description = "Alias for publishBankCleanerToHub."
+    dependsOn("publishBankCleanerToHub")
+}
 
 // Each plugin folder already contains its full `net/runelite/...` package path, so we
 // treat the folders themselves as source roots and keep one shared compile classpath.
