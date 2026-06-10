@@ -15,8 +15,10 @@ import java.util.Map;
 import java.util.Set;
 import javax.inject.Inject;
 import net.runelite.api.Client;
+import net.runelite.api.ItemComposition;
 import net.runelite.api.Varbits;
 import net.runelite.api.widgets.Widget;
+import net.runelite.client.game.ItemManager;
 import net.runelite.client.plugins.microbot.Microbot;
 import net.runelite.client.plugins.microbot.util.Global;
 import net.runelite.client.plugins.microbot.util.bank.Rs2Bank;
@@ -42,12 +44,15 @@ final class BankActuator
 	};
 
 	private final Client client;
+	private final ItemManager itemManager;
 	private final BankSnapshotReader snapshotReader;
+	private final Map<Integer, String> itemNameCache = new HashMap<>();
 
 	@Inject
-	BankActuator(Client client, BankSnapshotReader snapshotReader)
+	BankActuator(Client client, ItemManager itemManager, BankSnapshotReader snapshotReader)
 	{
 		this.client = client;
+		this.itemManager = itemManager;
 		this.snapshotReader = snapshotReader;
 	}
 
@@ -288,16 +293,28 @@ final class BankActuator
 		}
 
 		Microbot.drag(source, target);
-		boolean verified = Global.sleepUntil(() ->
-			tabCount(tabIndex) > beforeCount
-				&& (sourceTab <= 0 || tabCount(sourceTab) < beforeSourceCount)
-				&& quantityFor(itemId) == originalQuantity, 5000);
+		boolean verified = Global.sleepUntil(() -> {
+			if (quantityFor(itemId) != originalQuantity)
+			{
+				return false;
+			}
+			try
+			{
+				BankSnapshot.BankStack moved = stackByItemId(snapshotReader.read(), itemId);
+				return moved != null && moved.tab() == tabIndex && tabCount(tabIndex) > beforeCount
+					&& (sourceTab <= 0 || sourceTab == tabIndex || tabCount(sourceTab) < beforeSourceCount);
+			}
+			catch (Throwable ignored)
+			{
+				return false;
+			}
+		}, 5000);
 		return verified
 			? ActuatorResult.ok("Dragged item to existing tab " + tabIndex + ".")
 			: ActuatorResult.fail("Existing-tab drag was not verified.");
 	}
 
-	FullOrganizeResult runBankTagLayoutDelta(BankTagLayoutPlan plan)
+	FullOrganizeResult runBankTagLayoutDelta(BankTagLayoutPlan plan, boolean forceInsertVariants)
 	{
 		if (!ensureBankOpen())
 		{
@@ -316,6 +333,10 @@ final class BankActuator
 		BankSnapshot baseline = snapshotReader.read();
 		int originalCount = baseline.stackCount();
 		Map<Integer, Integer> originalQuantities = quantityMap(baseline);
+		if (forceInsertVariants)
+		{
+			cacheLayoutItemNames(plan.tabs());
+		}
 		int createdTabs = 0;
 		int moved = 0;
 		int sorted = 0;
@@ -332,7 +353,14 @@ final class BankActuator
 					return FullOrganizeResult.fail("Layout organize interrupted.", safeSnapshot(), createdTabs, moved);
 				}
 
-				ActuatorResult move = dragItemFromTabToMainTab(action.itemId(), action.sourceTab());
+				BankSnapshot.BankStack currentStack = stackByItemId(snapshotReader.read(), action.itemId());
+				if (currentStack == null)
+				{
+					return FullOrganizeResult.fail("Could not find " + action.name()
+						+ " before moving it to main.", safeSnapshot(), createdTabs, moved);
+				}
+
+				ActuatorResult move = dragItemFromTabToMainTab(action.itemId(), currentStack.tab());
 				steps.add("Main: " + move.message());
 				if (!move.success())
 				{
@@ -374,7 +402,14 @@ final class BankActuator
 				}
 
 				BankTagLayoutMoveAction seed = actions.get(0);
-				ActuatorResult createTab = dragItemFromTabToNewTab(seed.itemId(), seed.sourceTab());
+				BankSnapshot.BankStack currentSeed = stackByItemId(snapshotReader.read(), seed.itemId());
+				if (currentSeed == null)
+				{
+					return FullOrganizeResult.fail("Could not find " + seed.name()
+						+ " before creating layout tab " + tab.name() + ".", safeSnapshot(), createdTabs, moved);
+				}
+
+				ActuatorResult createTab = dragItemFromTabToNewTab(seed.itemId(), currentSeed.tab());
 				steps.add(tab.name() + ": " + createTab.message());
 				if (!createTab.success())
 				{
@@ -406,7 +441,18 @@ final class BankActuator
 				}
 
 				BankTagLayoutMoveAction action = actions.get(i);
-				ActuatorResult move = dragItemFromTabToExistingTab(action.itemId(), action.sourceTab(), tab.tabIndex());
+				BankSnapshot.BankStack currentStack = stackByItemId(snapshotReader.read(), action.itemId());
+				if (currentStack == null)
+				{
+					return FullOrganizeResult.fail("Could not find " + action.name()
+						+ " before moving it to " + tab.name() + ".", safeSnapshot(), createdTabs, moved);
+				}
+				if (currentStack.tab() == tab.tabIndex())
+				{
+					continue;
+				}
+
+				ActuatorResult move = dragItemFromTabToExistingTab(action.itemId(), currentStack.tab(), tab.tabIndex());
 				steps.add(tab.name() + ": " + move.message());
 				if (!move.success())
 				{
@@ -431,7 +477,7 @@ final class BankActuator
 				return FullOrganizeResult.fail("Layout sort interrupted.", safeSnapshot(), createdTabs, moved + sorted);
 			}
 
-			SortResult sort = sortTabByLayout(tab, originalCount, originalQuantities);
+			SortResult sort = sortTabByLayout(tab, forceInsertVariants, originalCount, originalQuantities);
 			if (!sort.success())
 			{
 				return FullOrganizeResult.fail(sort.message(), safeSnapshot(), createdTabs, moved + sorted);
@@ -453,6 +499,7 @@ final class BankActuator
 
 	private SortResult sortTabByLayout(
 		BankTagLayoutTab tab,
+		boolean forceInsertVariants,
 		int originalCount,
 		Map<Integer, Integer> originalQuantities)
 	{
@@ -478,7 +525,7 @@ final class BankActuator
 		{
 			BankSnapshot snapshot = snapshotReader.read();
 			List<BankSnapshot.BankStack> tabStacks = tabStacks(snapshot, tab.tabIndex());
-			List<Integer> desiredPresent = desiredPresentItemIds(tab, tabStacks);
+			List<Integer> desiredPresent = desiredPresentItemIds(tab, tabStacks, forceInsertVariants);
 			if (targetPosition >= desiredPresent.size())
 			{
 				return SortResult.ok("Sorted tab " + tab.tabIndex() + ".", moves);
@@ -518,7 +565,7 @@ final class BankActuator
 			boolean sortedPrefix = Global.sleepUntil(() -> {
 				BankSnapshot afterMove = snapshotReader.read();
 				return verifySnapshotUnchanged(originalCount, originalQuantities, afterMove) == null
-					&& isOrderedPrefix(afterMove, tab, verifiedPrefixLength);
+					&& isOrderedPrefix(afterMove, tab, forceInsertVariants, verifiedPrefixLength);
 			}, 5000);
 			if (!sortedPrefix)
 			{
@@ -648,6 +695,18 @@ final class BankActuator
 		return quantities;
 	}
 
+	private static BankSnapshot.BankStack stackByItemId(BankSnapshot snapshot, int itemId)
+	{
+		for (BankSnapshot.BankStack stack : snapshot.items())
+		{
+			if (stack.itemId() == itemId)
+			{
+				return stack;
+			}
+		}
+		return null;
+	}
+
 	private static Map<Integer, List<BankTagLayoutMoveAction>> layoutActionsByTargetTab(List<BankTagLayoutMoveAction> actions)
 	{
 		Map<Integer, List<BankTagLayoutMoveAction>> actionsByTab = new HashMap<>();
@@ -672,19 +731,86 @@ final class BankActuator
 		return stacks;
 	}
 
-	private static List<Integer> desiredPresentItemIds(BankTagLayoutTab tab, List<BankSnapshot.BankStack> tabStacks)
+	private List<Integer> desiredPresentItemIds(
+		BankTagLayoutTab tab,
+		List<BankSnapshot.BankStack> tabStacks,
+		boolean forceInsertVariants)
 	{
-		Set<Integer> present = new HashSet<>();
+		Map<Integer, BankSnapshot.BankStack> present = new HashMap<>();
 		for (BankSnapshot.BankStack stack : tabStacks)
 		{
-			present.add(stack.itemId());
+			present.putIfAbsent(stack.itemId(), stack);
+		}
+
+		if (forceInsertVariants)
+		{
+			return desiredPresentItemIdsWithForcedVariants(tab, present);
 		}
 
 		List<Integer> desired = new ArrayList<>();
 		Set<Integer> added = new HashSet<>();
 		for (int itemId : tab.orderedItemIds())
 		{
-			if (present.contains(itemId) && added.add(itemId))
+			if (present.containsKey(itemId) && added.add(itemId))
+			{
+				desired.add(itemId);
+			}
+		}
+		return desired;
+	}
+
+	private List<Integer> desiredPresentItemIdsWithForcedVariants(
+		BankTagLayoutTab tab,
+		Map<Integer, BankSnapshot.BankStack> present)
+	{
+		Map<String, List<BankSnapshot.BankStack>> presentVariantsByBase = new HashMap<>();
+		for (BankSnapshot.BankStack stack : present.values())
+		{
+			Variant variant = Variant.fromName(stack.name());
+			if (variant != null)
+			{
+				presentVariantsByBase.computeIfAbsent(variant.baseName(), ignored -> new ArrayList<>()).add(stack);
+			}
+		}
+		for (List<BankSnapshot.BankStack> variants : presentVariantsByBase.values())
+		{
+			variants.sort((left, right) -> {
+				Variant leftVariant = Variant.fromName(left.name());
+				Variant rightVariant = Variant.fromName(right.name());
+				int leftCharge = leftVariant == null ? -1 : leftVariant.charge();
+				int rightCharge = rightVariant == null ? -1 : rightVariant.charge();
+				int chargeCompare = Integer.compare(rightCharge, leftCharge);
+				return chargeCompare != 0 ? chargeCompare : Integer.compare(left.itemId(), right.itemId());
+			});
+		}
+
+		List<Integer> desired = new ArrayList<>();
+		Set<Integer> added = new HashSet<>();
+		for (int itemId : tab.orderedItemIds())
+		{
+			if (added.contains(itemId))
+			{
+				continue;
+			}
+
+			Variant csvVariant = Variant.fromName(itemName(itemId));
+			if (csvVariant != null)
+			{
+				List<BankSnapshot.BankStack> family = presentVariantsByBase.get(csvVariant.baseName());
+				if (family != null && !family.isEmpty())
+				{
+					for (BankSnapshot.BankStack variantStack : family)
+					{
+						if (added.add(variantStack.itemId()))
+						{
+							desired.add(variantStack.itemId());
+						}
+					}
+					continue;
+				}
+			}
+
+			if (present.containsKey(itemId) && added.add(itemId))
 			{
 				desired.add(itemId);
 			}
@@ -704,10 +830,73 @@ final class BankActuator
 		return -1;
 	}
 
-	private static boolean isOrderedPrefix(BankSnapshot snapshot, BankTagLayoutTab tab, int prefixLength)
+	private String itemName(int itemId)
+	{
+		String cached = itemNameCache.get(itemId);
+		if (cached != null)
+		{
+			return cached;
+		}
+
+		String name = Microbot.getClientThread().runOnClientThreadOptional(() -> itemNameOnClientThread(itemId)).orElse("");
+		itemNameCache.put(itemId, name);
+		return name;
+	}
+
+	private void cacheLayoutItemNames(List<BankTagLayoutTab> tabs)
+	{
+		Set<Integer> missing = new HashSet<>();
+		for (BankTagLayoutTab tab : tabs)
+		{
+			for (int itemId : tab.orderedItemIds())
+			{
+				if (!itemNameCache.containsKey(itemId))
+				{
+					missing.add(itemId);
+				}
+			}
+		}
+		if (missing.isEmpty())
+		{
+			return;
+		}
+
+		Map<Integer, String> names = Microbot.getClientThread().runOnClientThreadOptional(() -> {
+			Map<Integer, String> resolved = new HashMap<>();
+			for (int itemId : missing)
+			{
+				resolved.put(itemId, itemNameOnClientThread(itemId));
+			}
+			return resolved;
+		}).orElse(null);
+		if (names != null)
+		{
+			itemNameCache.putAll(names);
+		}
+	}
+
+	private String itemNameOnClientThread(int itemId)
+	{
+		try
+		{
+			ItemComposition composition = itemManager.getItemComposition(itemId);
+			String name = composition.getName();
+			return name == null ? "" : name;
+		}
+		catch (Throwable ignored)
+		{
+			return "";
+		}
+	}
+
+	private boolean isOrderedPrefix(
+		BankSnapshot snapshot,
+		BankTagLayoutTab tab,
+		boolean forceInsertVariants,
+		int prefixLength)
 	{
 		List<BankSnapshot.BankStack> stacks = tabStacks(snapshot, tab.tabIndex());
-		List<Integer> desired = desiredPresentItemIds(tab, stacks);
+		List<Integer> desired = desiredPresentItemIds(tab, stacks, forceInsertVariants);
 		if (desired.size() < prefixLength || stacks.size() < prefixLength)
 		{
 			return false;
@@ -734,6 +923,74 @@ final class BankActuator
 			return "item quantities changed.";
 		}
 		return null;
+	}
+
+	private static final class Variant
+	{
+		private final String baseName;
+		private final int charge;
+
+		private Variant(String baseName, int charge)
+		{
+			this.baseName = baseName;
+			this.charge = charge;
+		}
+
+		static Variant fromName(String name)
+		{
+			if (name == null)
+			{
+				return null;
+			}
+
+			String trimmed = name.trim();
+			if (!trimmed.endsWith(")"))
+			{
+				return null;
+			}
+
+			int open = trimmed.lastIndexOf('(');
+			if (open <= 0 || open + 1 >= trimmed.length() - 1)
+			{
+				return null;
+			}
+
+			String chargeText = trimmed.substring(open + 1, trimmed.length() - 1);
+			for (int i = 0; i < chargeText.length(); i++)
+			{
+				if (!Character.isDigit(chargeText.charAt(i)))
+				{
+					return null;
+				}
+			}
+
+			int charge;
+			try
+			{
+				charge = Integer.parseInt(chargeText);
+			}
+			catch (NumberFormatException ex)
+			{
+				return null;
+			}
+			if (charge <= 0)
+			{
+				return null;
+			}
+
+			String baseName = trimmed.substring(0, open).trim().toLowerCase();
+			return baseName.isEmpty() ? null : new Variant(baseName, charge);
+		}
+
+		String baseName()
+		{
+			return baseName;
+		}
+
+		int charge()
+		{
+			return charge;
+		}
 	}
 
 	static final class ActuatorResult

@@ -499,7 +499,7 @@ hubPluginPublications.forEach { publication ->
             val hubBranch = providers.gradleProperty("hubBranch").orNull ?: "development"
             val hubRemote = providers.gradleProperty("hubRemote").orNull ?: "origin"
             val hubCommit = hubBoolProperty("hubCommit", true)
-            val hubPush = hubBoolProperty("hubPush", false)
+            val hubPush = hubBoolProperty("hubPush", true)
             val hubMicrobotClientVersion = providers.gradleProperty("hubMicrobotClientVersion").orNull
             val hubMicrobotClientPath = providers.gradleProperty("hubMicrobotClientPath").orNull
                 ?: if (hubMicrobotClientVersion.isNullOrBlank()) {
@@ -536,10 +536,7 @@ hubPluginPublications.forEach { publication ->
             val staged = runCommand(listOf("git", "diff", "--cached", "--name-only"), hubDir)
             if (staged.isBlank()) {
                 logger.lifecycle("[${publication.key}] Hub checkout already matches the generated plugin.")
-                return@doLast
-            }
-
-            if (hubCommit) {
+            } else if (hubCommit) {
                 runCommand(listOf("git", "commit", "-m", "Publish ${publication.taskStem} plugin"), hubDir)
                 logger.lifecycle("[${publication.key}] Committed Hub changes in ${hubDir.path}.")
             } else {
@@ -550,7 +547,7 @@ hubPluginPublications.forEach { publication ->
                 runCommand(listOf("git", "push", hubRemote, hubBranch), hubDir)
                 logger.lifecycle("[${publication.key}] Pushed to $hubRemote/$hubBranch.")
             } else {
-                logger.lifecycle("[${publication.key}] Re-run with -PhubPush=true to push to $hubRemote/$hubBranch.")
+                logger.lifecycle("[${publication.key}] Push disabled by -PhubPush=false; changes remain local in ${hubDir.path}.")
             }
         }
     }

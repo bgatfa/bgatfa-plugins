@@ -62,8 +62,8 @@ final class BankSnapshotReader
 		for (int i = 0; i < bankItems.size(); i++)
 		{
 			Rs2ItemModel item = bankItems.get(i);
-			int canonicalId = itemManager.canonicalize(item.getId());
-			ItemComposition composition = itemManager.getItemComposition(canonicalId);
+			int itemId = item.getId();
+			ItemComposition composition = itemManager.getItemComposition(itemId);
 			String name = composition.getName();
 			if (name == null || name.isEmpty() || "null".equalsIgnoreCase(name))
 			{
@@ -71,7 +71,7 @@ final class BankSnapshotReader
 			}
 
 			stacks.add(new BankSnapshot.BankStack(
-				canonicalId,
+				itemId,
 				name,
 				item.getQuantity(),
 				item.getSlot(),

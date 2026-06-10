@@ -16,14 +16,14 @@ public interface BankOrganizerConfig extends Config
 	String DEFAULT_LAYOUT_TAB_1 = "banktags,1,Gathering,1511,layout,0,1511,1,1521,2,6333,3,6332,4,1519,5,1517,6,1515,7,1513,8,8778,9,8780,10,960,11,8782,12,32904,13,32907,14,32910,15,19669,16,438,17,440,18,453,19,447,20,449,21,451,22,442,23,444,24,2349,25,2351,26,2353,27,2359,28,2361,29,2363,30,2355,31,2357,32,436,33,31719,34,32892,35,32889,36,31716,37,434,38,1761,39,2922,40,1623,41,1621,42,1619,43,1617,44,1631,45,1625,46,1627,47,1629,48,1607,49,1605,50,1603,51,1601,52,1615,53,1609,54,1611,55,1613,56,1656,57,1639,58,1660,59,1681,60,1683,61,21090,62,21102,63,21105,64,1597,65,1592,66,1595,67,1700,68,1702,69,1759,70,21111,71,21114,72,1757,73,1733,74,1734,75,21504,76,1781,77,1783,78,1785,79,1775";
 
 	@ConfigItem(
-		keyName = "showOverlay",
-		name = "Show overlay",
-		description = "Show the Bank Organizer status overlay.",
+		keyName = "forceInsertVariants",
+		name = "Force insert variants",
+		description = "Group numeric charged variants at the first matching CSV position and sort them high-to-low.",
 		position = 0
 	)
-	default boolean showOverlay()
+	default boolean forceInsertVariants()
 	{
-		return true;
+		return false;
 	}
 
 	@ConfigItem(
