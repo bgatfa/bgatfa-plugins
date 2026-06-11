@@ -332,7 +332,6 @@ fun copyHubPluginToCheckout(publication: HubPluginPublication, hubDir: File) {
             content = configureHubPluginDescriptor(
                 content = content,
                 className = pluginClassName,
-                pluginDir = pluginDir,
                 publication = publication,
             )
         }
@@ -356,7 +355,6 @@ fun copyHubPluginToCheckout(publication: HubPluginPublication, hubDir: File) {
 fun configureHubPluginDescriptor(
     content: String,
     className: String,
-    pluginDir: File,
     publication: HubPluginPublication,
 ): String {
     val descriptorStart = content.indexOf("@PluginDescriptor(")
@@ -368,16 +366,8 @@ fun configureHubPluginDescriptor(
     val displayName = readDescriptorString(descriptorArgs, "name", pascalWords(publication.key))
     val description = readDescriptorString(descriptorArgs, "description", displayName)
     val tags = readDescriptorTags(descriptorArgs)
-    val iconUrl = if (localAssetExists(pluginDir, "icon.png")) {
-        "https://bgatfa.github.io/Microbot-Hub/${className}/assets/icon.png"
-    } else {
-        ""
-    }
-    val cardUrl = if (localAssetExists(pluginDir, "card.png")) {
-        "https://bgatfa.github.io/Microbot-Hub/${className}/assets/card.png"
-    } else {
-        ""
-    }
+    val iconUrl = ""
+    val cardUrl = ""
 
     val descriptor = """
         @PluginDescriptor(
@@ -460,6 +450,12 @@ fun writeHubPluginDocs(
                     include("**/*.png", "**/*.jpg", "**/*.jpeg", "**/*.gif")
                 }
                 into(assetsDir)
+            }
+            copy {
+                from(assetSource) {
+                    include("**/*.png", "**/*.jpg", "**/*.jpeg", "**/*.gif")
+                }
+                into(hubPluginResourceDir)
             }
         }
     }
@@ -617,6 +613,13 @@ val pluginJars = pluginKeys.map { key ->
         from(sourceSets.main.get().output) {
             pluginIncludes(key).forEach { include(it) }
             exclude(previewHarness)
+        }
+        listOf(file("plugins/$key/images"), file("plugins/$key/assets")).forEach { assetDir ->
+            if (assetDir.isDirectory) {
+                from(assetDir) {
+                    include("**/*.png", "**/*.jpg", "**/*.jpeg", "**/*.gif")
+                }
+            }
         }
     }
 } + externalPlugins.map { ext ->

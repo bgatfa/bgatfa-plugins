@@ -32,8 +32,8 @@ import net.runelite.client.plugins.microbot.Microbot;
 	authors = {"bgatfa"},
 	version = BankOrganizerPlugin.version,
 	minClientVersion = "2.0.61",
-	iconUrl = "https://bgatfa.github.io/Microbot-Hub/BankOrganizerPlugin/assets/icon.png",
-	cardUrl = "https://bgatfa.github.io/Microbot-Hub/BankOrganizerPlugin/assets/card.png",
+	iconUrl = "",
+	cardUrl = "",
 	enabledByDefault = false,
 	isExternal = true
 )
